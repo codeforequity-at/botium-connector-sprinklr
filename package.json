@@ -1,6 +1,6 @@
 {
   "name": "botium-connector-sprinklr",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Botium Connector for Sprinklr Live Chat",
   "main": "dist/botium-connector-sprinklr-cjs.js",
   "module": "dist/botium-connector-sprinklr-es.js",
