@@ -10,6 +10,7 @@ class BotiumConnectorSprinkl {
     this.queueBotSays = queueBotSays
     this.caps = caps
     this.chatSessionToken = null
+    this.userId = null
     this.conversationId = null
     this.pollingEnabled = false
     // Why semaphore?:
@@ -62,7 +63,8 @@ class BotiumConnectorSprinkl {
       }
       const appHandshake = await response.json()
       this.chatSessionToken = appHandshake.chatSessionToken
-      debug(`Start.handshake successful. chatSessionToken: "${this.chatSessionToken}"`)
+      this.userId = appHandshake?.chatUser?.userId || appHandshake.anonymousId
+      debug(`Start.handshake successful. chatSessionToken: "${this.chatSessionToken}. userId: "${this.userId}"`)
     } catch (err) {
       throw new Error(`Failed to do handshake: ${err.message}`)
     }
@@ -114,7 +116,7 @@ class BotiumConnectorSprinkl {
           if (notifications?.results?.length > 0) {
             debug(`Start._poll ${notifications.results.length} notifications polled`)
             for (const notification of notifications.results) {
-              if (notification?.payload?.type === 'NEW_MESSAGE' && notification?.conversationId === this.conversationId) {
+              if (notification?.payload && notification.payload.type === 'NEW_MESSAGE' && notification.conversationId === this.conversationId && notification.sender !== this.userId) {
                 const sprinklr = notification.payload.externalChatMessage
                 let buttons = []
                 if (sprinklr.messagePayload?.attachment?.buttons?.length) {
@@ -214,6 +216,7 @@ class BotiumConnectorSprinkl {
   Stop () {
     debug('Stop called')
     this.chatSessionToken = null
+    this.userId = null
     this.conversationId = null
     this.pollingEnabled = false
     if (this.messageSendingSemaphorePromise) {
