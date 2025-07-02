@@ -20,6 +20,7 @@ class BotiumConnectorSprinkl {
     // But for keeping the order of messages, we need to wait for the response of "hello bot" message.
     this.messageSendingSemaphorePromise = null
     this.messageSendingSemaphorePromiseResolve = null
+    this.handledMessages = null
   }
 
   async Validate () {
@@ -29,6 +30,7 @@ class BotiumConnectorSprinkl {
 
   async Start () {
     debug('Start called')
+    this.handledMessages = new Set()
     try {
       const url = `https://${this.caps[Capabilities.SPRINKL_ENVIRONMENT]}-live-chat.sprinklr.com/api/livechat/v1/handshake/appHandshake`
 
@@ -47,6 +49,9 @@ class BotiumConnectorSprinkl {
         body.chatUser = 'userId_firstName_lastName_profileImageUrl_phoneNo_email'.split('_').map(e => u[e] || '').join('_')
         hmac.update(Buffer.from(body.chatUser, 'utf8'))
         body.chatUserSignature = hmac.digest('hex')
+      }
+      if (this.caps[Capabilities.SPRINKL_CUSTOM_CONTEXT]) {
+        body.customContext = _.isString(this.caps[Capabilities.SPRINKL_CUSTOM_CONTEXT]) ? JSON.parse(this.caps[Capabilities.SPRINKL_CUSTOM_CONTEXT]) : this.caps[Capabilities.SPRINKL_CUSTOM_CONTEXT]
       }
       const options = {
         method: 'POST',
@@ -72,16 +77,21 @@ class BotiumConnectorSprinkl {
     try {
       const url = `https://${this.caps[Capabilities.SPRINKL_ENVIRONMENT].toLowerCase()}-live-chat.sprinklr.com/api/livechat/v1/conversation/new`
 
+      const body = {
+        appId: this.caps[Capabilities.SPRINKL_APP_ID]
+      }
+      if (this.caps[Capabilities.SPRINKL_STARTED_BY_CONTEXT]) {
+        body.startedByContext = _.isString(this.caps[Capabilities.SPRINKL_STARTED_BY_CONTEXT]) ? JSON.parse(this.caps[Capabilities.SPRINKL_STARTED_BY_CONTEXT]) : this.caps[Capabilities.SPRINKL_STARTED_BY_CONTEXT]
+      }
       const options = {
         method: 'POST',
         headers: {
           'x-chat-token': this.chatSessionToken,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({
-          appId: this.caps[Capabilities.SPRINKL_APP_ID]
-        })
+        body: JSON.stringify(body)
       }
+
       debug(`Start.newconvo requestOptions ${JSON.stringify({ url, options }, null, 2)}`)
       const response = await fetch(url, options)
       if (!response.ok) {
@@ -93,7 +103,7 @@ class BotiumConnectorSprinkl {
       debug(`Start.newconvo successful. conversationId: "${this.conversationId}"`)
 
       const _poll = async (cursor) => {
-        const url = `https://${this.caps[Capabilities.SPRINKL_ENVIRONMENT]}-live-chat.sprinklr.com/api/livechat/v1/event/fetch-notifications?size=100${cursor ? '&cursor=' + cursor : ''}`
+        const url = `https://${this.caps[Capabilities.SPRINKL_ENVIRONMENT]}-live-chat.sprinklr.com/api/livechat/v1/event/fetch-notifications?size=1000`
 
         const options = {
           method: 'GET',
@@ -102,6 +112,7 @@ class BotiumConnectorSprinkl {
             'content-type': 'application/json'
           }
         }
+
         let notifications
         try {
           try {
@@ -114,9 +125,9 @@ class BotiumConnectorSprinkl {
             throw new Error(`Failed to fetch notifications: ${err.message}`)
           }
           if (notifications?.results?.length > 0) {
-            debug(`Start._poll ${notifications.results.length} notifications polled`)
-            for (const notification of notifications.results) {
-              if (notification?.payload && notification.payload.type === 'NEW_MESSAGE' && notification.conversationId === this.conversationId && notification.sender !== this.userId) {
+            debug(`Start._poll ${notifications.results.length} notifications polled hasMore: ${notifications.hasMore}, afterCursor: ${notifications.afterCursor}, beforeCursor: ${notifications.beforeCursor}`)
+            for (const notification of _.sortBy(notifications.results, (n) => n.creationTime)) {
+              if (notification?.payload && notification.payload.type === 'NEW_MESSAGE' && notification.conversationId === this.conversationId && notification.sender !== this.userId && !this.handledMessages.has(notification.id)) {
                 const sprinklr = notification.payload.externalChatMessage
                 let buttons = []
                 if (sprinklr.messagePayload?.attachment?.buttons?.length) {
@@ -143,6 +154,7 @@ class BotiumConnectorSprinkl {
                   buttons: buttons,
                   sourceData: notification
                 }
+                this.handledMessages.add(notification.id)
                 debug(`Start._poll bot message: ${JSON.stringify(msg, null, 2)}`)
                 await (this.messageSendingSemaphorePromise || Promise.resolve())
                 setTimeout(() => this.queueBotSays(msg), 0)
@@ -174,19 +186,24 @@ class BotiumConnectorSprinkl {
     try {
       const url = `https://${this.caps[Capabilities.SPRINKL_ENVIRONMENT]}-live-chat.sprinklr.com/api/livechat/v1/conversation/send`
 
+      const body = {
+        conversationId: this.conversationId,
+        messagePayload: {
+          text: msg.messageText,
+          messageType: 'MESSAGE'
+        }
+      }
+      if (msg.SPRINKLR_PARAM && _.isObject(msg.SPRINKLR_PARAM)) {
+        body.additionalContext = Object.assign({}, msg.SPRINKLR_PARAM)
+      }
+
       const options = {
         method: 'POST',
         headers: {
           'x-chat-token': this.chatSessionToken,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({
-          conversationId: this.conversationId,
-          messagePayload: {
-            text: msg.messageText,
-            messageType: 'MESSAGE'
-          }
-        })
+        body: JSON.stringify(body)
       }
 
       debug(`UserSays.messageSend requestOptions ${JSON.stringify({ url, options }, null, 2)}`)
@@ -227,6 +244,7 @@ class BotiumConnectorSprinkl {
       debug('Stop semaphore resolve is not null!')
     }
     this.messageSendingSemaphorePromiseResolve = null
+    this.handledMessages = null
   }
 }
 

@@ -84,6 +84,20 @@ module.exports = {
         label: 'Chat User (userId, firstName, lastName, profileImageUrl, phoneNo, email)',
         type: 'json',
         advanced: true
+      },
+      {
+        name: 'SPRINKL_CUSTOM_CONTEXT',
+        label: 'Custom context (key-value pairs)',
+        description: 'Refers to the object containing key and value pairs for profile custom field names and corresponding values',
+        type: 'json',
+        advanced: true
+      },
+      {
+        name: 'SPRINKL_STARTED_BY_CONTEXT',
+        label: 'Started by context (key-value pairs)',
+        description: 'Refers to the object containing the key and value pair for case custom field name and corresponding value',
+        type: 'json',
+        advanced: true
       }
     ]
   }
