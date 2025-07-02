@@ -112,9 +112,6 @@ class BotiumConnectorSprinkl {
             'content-type': 'application/json'
           }
         }
-        const _humanReadable = (notifications) => {
-          return JSON.stringify(notifications.results.filter(n => n?.payload && n.payload.type === 'NEW_MESSAGE' && n.conversationId === this.conversationId && n.sender !== this.userId).map(n => n.payload?.description))
-        }
 
         let notifications
         try {
@@ -127,7 +124,6 @@ class BotiumConnectorSprinkl {
           } catch (err) {
             throw new Error(`Failed to fetch notifications: ${err.message}`)
           }
-          console.log(`notificationsSome ===> ${_humanReadable(notifications)}`)
           if (notifications?.results?.length > 0) {
             debug(`Start._poll ${notifications.results.length} notifications polled hasMore: ${notifications.hasMore}, afterCursor: ${notifications.afterCursor}, beforeCursor: ${notifications.beforeCursor}`)
             for (const notification of _.sortBy(notifications.results, (n) => n.creationTime)) {
