@@ -145,7 +145,7 @@ class BotiumConnectorSprinkl {
                 if (sprinklr.messagePayload?.quickReplies?.buttons?.length) {
                   buttons = [...buttons, ...sprinklr.messagePayload.quickReplies.buttons.map(b => ({
                     text: b.title,
-                    payload: b.payload
+                    payload: b.postBackHandlerType === 'TEXT_POST_BACK' ? b.title : (b.payload || b.title)
                   }))]
                 }
                 const msg = {
