@@ -1,6 +1,6 @@
 {
   "name": "botium-connector-sprinklr",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Botium Connector for Sprinklr Live Chat",
   "main": "dist/botium-connector-sprinklr-cjs.js",
   "module": "dist/botium-connector-sprinklr-es.js",
@@ -8,8 +8,8 @@
     "build": "npm run eslint && rollup -c && cp logo.png dist",
     "eslint": "eslint index.js src/**/*.js",
     "eslint:fix": "eslint --fix index.js src/**/*.js",
-    "test": "echo 'Not implemented yet'",
-    "test-nightly": "echo 'Not implemented yet'"
+    "test": "mocha test/nlp-testing.spec.js",
+    "test-nightly": "mocha test/nightly/connector.spec.js"
   },
   "repository": {
     "type": "git",
@@ -46,6 +46,7 @@
   "dependencies": {
     "@babel/runtime": "^7.12.13",
     "debug": "^4.3.7",
+    "ioredis": "^5.3.2",
     "lodash": "^4.17.20"
   }
 }
