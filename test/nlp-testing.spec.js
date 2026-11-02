@@ -174,76 +174,78 @@ describe('NLP Testing Mode', function () {
   })
 
   describe('Webhook Processing', function () {
-    it('should process case.update webhook with matching conversation ID', function (done) {
-      let queuedMessage = null
+    const createConnector = (queueBotSays, extraCaps = {}) => {
       const connector = new BotiumConnectorSprinkl({
-        queueBotSays: (msg) => {
-          queuedMessage = msg
-        },
+        queueBotSays,
         caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING'
+          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
+          [Capabilities.SPRINKL_SA_INTENT_FIELD_MAPPING]: '_c_6a8d564990b44d451cc190c1',
+          ...extraCaps
         }
       })
-
       connector.processInbound = true
-      connector.saConversationId = 'case_1a24d122ade41d35331ssa3'
+      connector.saConversationId = 'case_test'
+      connector.saCaseNumber = 183479
+      connector.saAwaitingNlpResponse = true
+      connector.saHandledWebhookIds = new Set()
+      connector.saEmittedResponseCount = 0
+      connector.saLastUserMessageText = 'hey'
+      return connector
+    }
 
-      const webhookEvent = {
-        body: {
-          type: 'case.update',
-          payload: {
-            description: 'hello how are you',
-            externalCase: {
-              id: 'case_1a24d122ade41d35331ssa3'
-            },
-            workflow: {
-              customProperties: {
-                '_c_6a8d564990b44d451cc190c1': ['Greetings']
-              }
-            }
+    const caseUpdate = ({ id, version, description, intent, fanCount, latestMessageTime, convId }) => ({
+      body: {
+        id: id || `evt_${version || 1}`,
+        type: 'case.update',
+        payload: {
+          caseNumber: 183479,
+          version: version || 1,
+          description: description || 'hey',
+          associatedFanMessageCount: fanCount,
+          latestMessageAssociatedTime: latestMessageTime,
+          externalCase: {
+            id: convId || 'case_test'
+          },
+          workflow: {
+            customProperties: intent
+              ? { '_c_6a8d564990b44d451cc190c1': [intent] }
+              : {}
           }
         }
       }
+    })
 
-      connector._processInboundEvent(webhookEvent)
+    it('should process case.update webhook with matching case number', function (done) {
+      let queuedMessage = null
+      const connector = createConnector((msg) => { queuedMessage = msg })
+      connector.saLastUserMessageText = 'hello how are you'
 
-      // Wait for async queueBotSays
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_1',
+        description: 'hello how are you',
+        intent: 'Greetings',
+        fanCount: 1,
+        latestMessageTime: 1000
+      }))
+
       setTimeout(() => {
         assert.isNotNull(queuedMessage)
         assert.equal(queuedMessage.sender, 'bot')
         assert.equal(queuedMessage.messageText, 'hello how are you')
+        assert.equal(queuedMessage.nlp.intent.name, 'Greetings')
         assert.isNotNull(queuedMessage.sourceData)
+        assert.equal(connector.saAwaitingNlpResponse, false)
         done()
       }, 50)
     })
 
-    it('should ignore webhook with non-matching conversation ID', function (done) {
+    it('should ignore webhook with non-matching case number', function (done) {
       let queuedMessage = null
-      const connector = new BotiumConnectorSprinkl({
-        queueBotSays: (msg) => {
-          queuedMessage = msg
-        },
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING'
-        }
-      })
+      const connector = createConnector((msg) => { queuedMessage = msg })
 
-      connector.processInbound = true
-      connector.saConversationId = 'case_expected_id'
-
-      const webhookEvent = {
-        body: {
-          type: 'case.update',
-          payload: {
-            description: 'test message',
-            externalCase: {
-              id: 'case_different_id'
-            }
-          }
-        }
-      }
-
-      connector._processInboundEvent(webhookEvent)
+      const event = caseUpdate({ id: 'evt_mismatch', intent: 'Greetings', fanCount: 1 })
+      event.body.payload.caseNumber = 999999
+      connector._processInboundEvent(event)
 
       setTimeout(() => {
         assert.isNull(queuedMessage)
@@ -253,29 +255,10 @@ describe('NLP Testing Mode', function () {
 
     it('should ignore webhook when processInbound is false', function (done) {
       let queuedMessage = null
-      const connector = new BotiumConnectorSprinkl({
-        queueBotSays: (msg) => {
-          queuedMessage = msg
-        },
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING'
-        }
-      })
-
+      const connector = createConnector((msg) => { queuedMessage = msg })
       connector.processInbound = false
-      connector.saConversationId = 'case_test'
 
-      const webhookEvent = {
-        body: {
-          type: 'case.update',
-          payload: {
-            description: 'test',
-            externalCase: { id: 'case_test' }
-          }
-        }
-      }
-
-      connector._processInboundEvent(webhookEvent)
+      connector._processInboundEvent(caseUpdate({ id: 'evt_pi_false', intent: 'Greetings', fanCount: 1 }))
 
       setTimeout(() => {
         assert.isNull(queuedMessage)
@@ -285,28 +268,18 @@ describe('NLP Testing Mode', function () {
 
     it('should ignore non-case.update event types', function (done) {
       let queuedMessage = null
-      const connector = new BotiumConnectorSprinkl({
-        queueBotSays: (msg) => {
-          queuedMessage = msg
-        },
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING'
-        }
-      })
+      const connector = createConnector((msg) => { queuedMessage = msg })
 
-      connector.processInbound = true
-      connector.saConversationId = 'case_test'
-
-      const webhookEvent = {
+      connector._processInboundEvent({
         body: {
+          id: 'evt_create',
           type: 'case.create',
           payload: {
+            caseNumber: 183479,
             externalCase: { id: 'case_test' }
           }
         }
-      }
-
-      connector._processInboundEvent(webhookEvent)
+      })
 
       setTimeout(() => {
         assert.isNull(queuedMessage)
@@ -316,26 +289,20 @@ describe('NLP Testing Mode', function () {
 
     it('should extract intents from webhook custom properties', function (done) {
       let queuedMessage = null
-      const connector = new BotiumConnectorSprinkl({
-        queueBotSays: (msg) => {
-          queuedMessage = msg
-        },
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
-          [Capabilities.SPRINKL_SA_INTENT_FIELD_MAPPING]: {
-            '_c_intent_field': 'IntentField'
-          }
+      const connector = createConnector((msg) => { queuedMessage = msg }, {
+        [Capabilities.SPRINKL_SA_INTENT_FIELD_MAPPING]: {
+          '_c_intent_field': 'IntentField'
         }
       })
 
-      connector.processInbound = true
-      connector.saConversationId = 'case_test'
-
-      const webhookEvent = {
+      connector._processInboundEvent({
         body: {
+          id: 'evt_intent',
           type: 'case.update',
           payload: {
+            caseNumber: 183479,
             description: 'test message',
+            associatedFanMessageCount: 1,
             externalCase: { id: 'case_test' },
             workflow: {
               customProperties: {
@@ -345,9 +312,7 @@ describe('NLP Testing Mode', function () {
             }
           }
         }
-      }
-
-      connector._processInboundEvent(webhookEvent)
+      })
 
       setTimeout(() => {
         assert.isNotNull(queuedMessage)
@@ -355,6 +320,125 @@ describe('NLP Testing Mode', function () {
         assert.isNotNull(queuedMessage.nlp.intent)
         assert.equal(queuedMessage.nlp.intent.name, 'TestIntent')
         assert.equal(queuedMessage.nlp.intents.length, 2)
+        done()
+      }, 50)
+    })
+
+    it('should emit only one bot message for multiple case.update webhooks in one turn', function (done) {
+      const queued = []
+      const connector = createConnector((msg) => { queued.push(msg) })
+
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_a', version: 2, intent: 'Greetings', fanCount: 1, latestMessageTime: 1000
+      }))
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_b', version: 3, intent: 'Greetings', fanCount: 1, latestMessageTime: 1000
+      }))
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_c', version: 4, intent: 'Greetings', fanCount: 1, latestMessageTime: 1100
+      }))
+
+      setTimeout(() => {
+        assert.equal(queued.length, 1)
+        assert.equal(queued[0].nlp.intent.name, 'Greetings')
+        assert.equal(connector.saAwaitingNlpResponse, false)
+        done()
+      }, 50)
+    })
+
+    it('should ignore duplicate webhook event ids', function (done) {
+      const queued = []
+      const connector = createConnector((msg) => { queued.push(msg) })
+
+      const event = caseUpdate({
+        id: 'evt_dup', intent: 'Greetings', fanCount: 1, latestMessageTime: 1000
+      })
+      // First one should emit and close the turn; duplicate id alone is also guarded
+      connector._processInboundEvent(event)
+      connector.saAwaitingNlpResponse = true
+      connector._processInboundEvent(event)
+
+      setTimeout(() => {
+        assert.equal(queued.length, 1)
+        done()
+      }, 50)
+    })
+
+    it('should skip case.update without intent while awaiting', function (done) {
+      let queuedMessage = null
+      const connector = createConnector((msg) => { queuedMessage = msg })
+
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_no_intent', fanCount: 1, latestMessageTime: 1000, intent: null
+      }))
+
+      setTimeout(() => {
+        assert.isNull(queuedMessage)
+        assert.equal(connector.saAwaitingNlpResponse, true)
+        done()
+      }, 50)
+    })
+
+    it('should support multiple turns in one conversation with one response each', function (done) {
+      const queued = []
+      const connector = createConnector((msg) => { queued.push(msg) })
+
+      // Turn 1: hi -> Greetings
+      connector.saLastUserMessageText = 'hi'
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_t1_a', version: 2, description: 'hi', intent: 'Greetings',
+        fanCount: 1, latestMessageTime: 1000
+      }))
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_t1_b', version: 3, description: 'hi', intent: 'Greetings',
+        fanCount: 1, latestMessageTime: 1000
+      }))
+
+      // Turn 2: how are you -> Help (same conversation / case)
+      connector._armNlpTurn('how are you', 'msg_turn2')
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_t2_stale', version: 4, description: 'hi', intent: 'Greetings',
+        fanCount: 1, latestMessageTime: 1000
+      }))
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_t2_ok', version: 5, description: 'hi', intent: 'Help',
+        fanCount: 2, latestMessageTime: 2000
+      }))
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_t2_extra', version: 6, description: 'hi', intent: 'Help',
+        fanCount: 2, latestMessageTime: 2000
+      }))
+
+      setTimeout(() => {
+        assert.equal(queued.length, 2)
+        assert.equal(queued[0].messageText, 'hi')
+        assert.equal(queued[0].nlp.intent.name, 'Greetings')
+        assert.equal(queued[1].messageText, 'how are you')
+        assert.equal(queued[1].nlp.intent.name, 'Help')
+        assert.equal(connector.saEmittedResponseCount, 2)
+        assert.equal(connector.saAwaitingNlpResponse, false)
+        done()
+      }, 50)
+    })
+
+    it('should accept later turn when fan count advances even if intent is unchanged', function (done) {
+      const queued = []
+      const connector = createConnector((msg) => { queued.push(msg) })
+
+      connector.saLastUserMessageText = 'hi'
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_u1', intent: 'Greetings', fanCount: 1, latestMessageTime: 1000
+      }))
+
+      connector._armNlpTurn('where are you', 'msg_turn2')
+      connector._processInboundEvent(caseUpdate({
+        id: 'evt_u2', intent: 'Greetings', fanCount: 2, latestMessageTime: 2000
+      }))
+
+      setTimeout(() => {
+        assert.equal(queued.length, 2)
+        assert.equal(queued[1].messageText, 'where are you')
+        assert.equal(queued[1].nlp.intent.name, 'Greetings')
         done()
       }, 50)
     })
@@ -378,31 +462,12 @@ describe('NLP Testing Mode', function () {
       }
     })
 
-    it('should require SPRINKL_SA_AUTH_TOKEN in NLP_TESTING token mode', async function () {
+    it('should require OAuth client credentials in NLP_TESTING mode', async function () {
       const connector = new BotiumConnectorSprinkl({
         queueBotSays: () => {},
         caps: {
           [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
-          [Capabilities.SPRINKL_SA_ACCOUNT_ID]: '300289798',
-          [Capabilities.SPRINKL_SA_AUTH_MODE]: 'token'
-        }
-      })
-
-      try {
-        await connector.Validate()
-        assert.fail('Should have thrown error')
-      } catch (err) {
-        assert.include(err.message, 'SPRINKL_SA_AUTH_TOKEN')
-      }
-    })
-
-    it('should require OAuth credentials in client-credentials mode', async function () {
-      const connector = new BotiumConnectorSprinkl({
-        queueBotSays: () => {},
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
-          [Capabilities.SPRINKL_SA_ACCOUNT_ID]: '300289798',
-          [Capabilities.SPRINKL_SA_AUTH_MODE]: 'client-credentials'
+          [Capabilities.SPRINKL_SA_ACCOUNT_ID]: '300289798'
         }
       })
 
@@ -414,37 +479,22 @@ describe('NLP Testing Mode', function () {
       }
     })
 
-    it('should detect OAuth vs token authentication mode', function () {
-      const connectorToken = new BotiumConnectorSprinkl({
-        queueBotSays: () => {},
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
-          [Capabilities.SPRINKL_SA_AUTH_MODE]: 'token'
-        }
-      })
-      assert.equal(connectorToken._getSAAuthMode(), 'token')
-      assert.equal(connectorToken._isSAOAuthMode(), false)
-
-      const connectorOAuth = new BotiumConnectorSprinkl({
-        queueBotSays: () => {},
-        caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
-          [Capabilities.SPRINKL_SA_AUTH_MODE]: 'client-credentials'
-        }
-      })
-      assert.equal(connectorOAuth._getSAAuthMode(), 'client-credentials')
-      assert.equal(connectorOAuth._isSAOAuthMode(), true)
-    })
-
-    it('should default to token mode if not specified', function () {
+    it('should require SPRINKL_SA_CLIENT_SECRET when client id is present', async function () {
       const connector = new BotiumConnectorSprinkl({
         queueBotSays: () => {},
         caps: {
-          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING'
+          [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
+          [Capabilities.SPRINKL_SA_ACCOUNT_ID]: '300289798',
+          [Capabilities.SPRINKL_SA_CLIENT_ID]: 'client-id'
         }
       })
-      assert.equal(connector._getSAAuthMode(), 'token')
-      assert.equal(connector._isSAOAuthMode(), false)
+
+      try {
+        await connector.Validate()
+        assert.fail('Should have thrown error')
+      } catch (err) {
+        assert.include(err.message, 'SPRINKL_SA_CLIENT_SECRET')
+      }
     })
 
     it('should require LIVE_CHAT capabilities in LIVE_CHAT mode', async function () {

@@ -37,6 +37,16 @@ class BotiumConnectorSprinkl {
     this.saConversationId = null
     this.saCaseNumber = null // Track case number from API response
     this.saPendingMessages = new Map() // Map messageId to expected case
+    this.saAwaitingNlpResponse = false // One bot response per UserSays turn
+    this.saHandledWebhookIds = new Set() // Deduplicate Sprinklr webhook event ids
+    this.saLastUserMessageText = null
+    this.saLastMessageId = null
+    this.saEmittedResponseCount = 0
+    this.saLastEmittedIntentName = null
+    this.saLastSeenFanCount = null
+    this.saLastSeenLatestMessageTime = null
+    this.saTurnBaselineFanCount = null
+    this.saTurnBaselineLatestMessageTime = null
   }
 
   _getMode () {
@@ -60,27 +70,17 @@ class BotiumConnectorSprinkl {
   // ============================================================================
 
   async _fetchSAToken () {
-    // Build token URL with environment
     const environment = this.caps[Capabilities.SPRINKL_SA_ENVIRONMENT] || 'prod3'
     const tokenUrl = `https://api3.sprinklr.com/${environment}/oauth/token`
     const maskedClientId = this.caps[Capabilities.SPRINKL_SA_CLIENT_ID]?.substring(0, 8) + '...'
 
-    debug('━'.repeat(70))
-    debug('🔐 FETCHING OAUTH TOKEN (Client Credentials)')
-    debug('━'.repeat(70))
-    debug(`   URL: ${tokenUrl}`)
-    debug('   Grant Type: client_credentials')
-    debug(`   Client ID: ${maskedClientId}`)
-    debug('   Client Secret: ********')
+    debug(`Fetching OAuth token (client_credentials) for ${maskedClientId}`)
 
     const body = new URLSearchParams({
       grant_type: 'client_credentials',
       client_id: this.caps[Capabilities.SPRINKL_SA_CLIENT_ID],
       client_secret: this.caps[Capabilities.SPRINKL_SA_CLIENT_SECRET]
     })
-
-    debug('   📤 Sending authentication request...')
-    const startTime = Date.now()
 
     try {
       const response = await fetch(tokenUrl, {
@@ -89,33 +89,16 @@ class BotiumConnectorSprinkl {
         body: body.toString()
       })
 
-      const elapsed = Date.now() - startTime
-      debug(`   ⏱️  Response received in ${elapsed}ms`)
-
       if (!response.ok) {
         const errorText = await response.text()
-        debug('   ❌ AUTHENTICATION FAILED')
-        debug(`   Status: ${response.status} ${response.statusText}`)
-        debug(`   Error: ${errorText}`)
-        debug('━'.repeat(70))
         throw new Error(`SA OAuth token fetch failed: ${response.status}/${response.statusText} - ${errorText}`)
       }
 
       const data = await response.json()
-      debug('   ✅ AUTHENTICATION SUCCESSFUL!')
-      debug(`   Access Token: ${data.access_token ? data.access_token.substring(0, 20) + '...' : 'N/A'}`)
-      debug(`   Token Type: ${data.token_type || 'N/A'}`)
-      debug(`   Expires In: ${data.expires_in || 'N/A'} seconds`)
-      debug(`   Has Refresh Token: ${data.refresh_token ? 'Yes' : 'No'}`)
-
       this._storeSAToken(data)
-
-      debug('━'.repeat(70))
-      debug('✅ OAuth token acquired via client_credentials')
-      debug('━'.repeat(70))
+      debug('OAuth token acquired')
     } catch (err) {
-      debug('   ❌ FETCH ERROR:', err.message)
-      debug('━'.repeat(70))
+      debug(`OAuth token fetch error: ${err.message}`)
       throw err
     }
   }
@@ -124,12 +107,7 @@ class BotiumConnectorSprinkl {
     const environment = this.caps[Capabilities.SPRINKL_SA_ENVIRONMENT] || 'prod3'
     const tokenUrl = `https://api3.sprinklr.com/${environment}/oauth/token`
 
-    debug('━'.repeat(70))
-    debug('🔄 REFRESHING OAUTH TOKEN')
-    debug('━'.repeat(70))
-    debug(`   URL: ${tokenUrl}`)
-    debug('   Grant Type: refresh_token')
-    debug(`   Has Refresh Token: ${this.saRefreshToken ? 'Yes' : 'No'}`)
+    debug('Refreshing OAuth token')
 
     const body = new URLSearchParams({
       grant_type: 'refresh_token',
@@ -138,35 +116,21 @@ class BotiumConnectorSprinkl {
       refresh_token: this.saRefreshToken
     })
 
-    debug('   📤 Sending refresh request...')
-    const startTime = Date.now()
-
     const response = await fetch(tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString()
     })
 
-    const elapsed = Date.now() - startTime
-    debug(`   ⏱️  Response received in ${elapsed}ms`)
-
     if (!response.ok) {
-      debug(`   ⚠️  Refresh failed (${response.status}), falling back to client_credentials`)
-      debug('━'.repeat(70))
+      debug(`OAuth refresh failed (${response.status}), falling back to client_credentials`)
       await this._fetchSAToken()
       return
     }
 
     const data = await response.json()
-    debug('   ✅ TOKEN REFRESHED SUCCESSFULLY!')
-    debug(`   New Access Token: ${data.access_token ? data.access_token.substring(0, 20) + '...' : 'N/A'}`)
-    debug(`   Expires In: ${data.expires_in || 'N/A'} seconds`)
-
     this._storeSAToken(data)
-
-    debug('━'.repeat(70))
-    debug('✅ OAuth token refreshed')
-    debug('━'.repeat(70))
+    debug('OAuth token refreshed')
   }
 
   _storeSAToken (data) {
@@ -174,15 +138,8 @@ class BotiumConnectorSprinkl {
     this.saRefreshToken = data.refresh_token || this.saRefreshToken
     // Expire 60 seconds early to avoid edge-case expiry mid-request
     this.saTokenExpiresAt = Date.now() + ((data.expires_in || 3600) - 60) * 1000
-
-    const expiryDate = new Date(this.saTokenExpiresAt)
     const secondsUntilExpiry = Math.floor((this.saTokenExpiresAt - Date.now()) / 1000)
-
-    debug('💾 TOKEN STORED')
-    debug(`   Access Token: ${this.saAuthToken ? this.saAuthToken.substring(0, 20) + '...' : 'N/A'}`)
-    debug(`   Refresh Token: ${this.saRefreshToken ? 'Present' : 'Not present'}`)
-    debug(`   Expires At: ${expiryDate.toISOString()}`)
-    debug(`   Valid For: ${secondsUntilExpiry} seconds (${Math.floor(secondsUntilExpiry / 60)} minutes)`)
+    debug(`OAuth token stored, valid for ${secondsUntilExpiry}s`)
   }
 
   async _ensureSAToken () {
@@ -191,176 +148,179 @@ class BotiumConnectorSprinkl {
     const isExpired = hasToken && now >= this.saTokenExpiresAt
     const secondsRemaining = hasToken && !isExpired ? Math.floor((this.saTokenExpiresAt - now) / 1000) : 0
 
-    debug('🔍 Checking token validity...')
-    debug(`   Has Token: ${hasToken ? 'Yes' : 'No'}`)
-
-    if (hasToken) {
-      debug(`   Is Expired: ${isExpired ? 'Yes' : 'No'}`)
-      debug(`   Time Remaining: ${secondsRemaining} seconds`)
-    }
-
     if (!this.saAuthToken || Date.now() >= this.saTokenExpiresAt) {
       if (this.saRefreshToken && this.saAuthToken) {
-        debug('   ⚠️  Token expired, refreshing...')
         await this._refreshSAToken()
       } else {
-        debug('   ⚠️  No token available, fetching new token...')
         await this._fetchSAToken()
       }
     } else {
-      debug(`   ✅ Token still valid (${secondsRemaining}s remaining)`)
+      debug(`OAuth token valid (${secondsRemaining}s remaining)`)
     }
   }
 
-  // ============================================================================
   // NLP TESTING MODE - WEBHOOK PROCESSING
   // ============================================================================
 
-  _extractIntentFromWebhook (customProperties) {
-    debug('_extractIntentFromWebhook called with customProperties:', JSON.stringify(customProperties, null, 2))
+  _resolveIntentFieldMapping () {
+    let mapping = this.caps[Capabilities.SPRINKL_SA_INTENT_FIELD_MAPPING]
+    if (!mapping) return null
 
-    const nlp = { intents: [] }
-
-    // First, check for custom field ID provided by user
-    const intentFieldId = this.caps[Capabilities.SPRINKL_SA_INTENT_FIELD_MAPPING]
-    if (intentFieldId) {
-      debug(`Checking custom field for intents: ${intentFieldId}`)
-      const intentArray = customProperties[intentFieldId]
-      if (intentArray && Array.isArray(intentArray) && intentArray.length > 0) {
-        intentArray.forEach(intentName => {
-          nlp.intents.push({
-            name: intentName,
-            confidence: 1.0
-          })
-          debug(`  ✅ Extracted intent from custom field: ${intentName}`)
-        })
-      } else {
-        debug(`  ⚠️  Custom field ${intentFieldId} not found or empty`)
+    if (_.isString(mapping)) {
+      try {
+        const parsed = JSON.parse(mapping)
+        mapping = parsed
+      } catch (err) {
+        // Plain field id string, e.g. "_c_6a8d564990b44d451cc190c1"
+        return mapping
       }
     }
 
-    // If no intents extracted from custom field, check triggered issue types
-    if (nlp.intents.length === 0) {
-      const triggeredIssues = customProperties.spr_triggered_issue_types || []
-      triggeredIssues.forEach(issue => {
-        nlp.intents.push({ name: issue, confidence: 1.0 })
-        debug(`  ✅ Added triggered issue type: ${issue}`)
+    return mapping
+  }
+
+  _addUniqueIntent (nlp, intentName, confidence) {
+    if (!intentName || nlp.intents.some(i => i.name === intentName)) return
+    nlp.intents.push({ name: intentName, confidence })
+  }
+
+  _extractIntentFromWebhook (customProperties) {
+    const nlp = { intents: [] }
+    const mapping = this._resolveIntentFieldMapping()
+
+    if (_.isString(mapping) && mapping) {
+      const intentArray = customProperties[mapping]
+      if (intentArray && Array.isArray(intentArray) && intentArray.length > 0) {
+        intentArray.forEach(intentName => this._addUniqueIntent(nlp, intentName, 1.0))
+      }
+    } else if (mapping && _.isObject(mapping)) {
+      Object.keys(mapping).forEach(fieldId => {
+        const intentArray = customProperties[fieldId]
+        if (intentArray && Array.isArray(intentArray) && intentArray.length > 0) {
+          intentArray.forEach(intentName => this._addUniqueIntent(nlp, intentName, 1.0))
+        }
       })
     }
 
-    // If still no intents, check detected issue types (fallback)
-    if (nlp.intents.length === 0) {
-      const detectedIssues = customProperties.spr_detected_issue_types || []
-      detectedIssues.forEach(issue => {
-        nlp.intents.push({ name: issue, confidence: 0.9 })
-        debug(`  ✅ Added detected issue type: ${issue}`)
-      })
-    }
+    const triggeredIssues = customProperties.spr_triggered_issue_types || []
+    triggeredIssues.forEach(issue => this._addUniqueIntent(nlp, issue, 1.0))
 
-    // Set primary intent (first one with highest confidence)
+    const detectedIssues = customProperties.spr_detected_issue_types || []
+    detectedIssues.forEach(issue => this._addUniqueIntent(nlp, issue, 0.9))
+
     if (nlp.intents.length > 0) {
       nlp.intents.sort((a, b) => b.confidence - a.confidence)
       nlp.intent = nlp.intents[0]
-      debug(`Primary intent selected: "${nlp.intent.name}" (confidence: ${nlp.intent.confidence})`)
-    } else {
-      debug('No intents extracted from webhook')
     }
 
-    return Object.keys(nlp).length > 0 && nlp.intents.length > 0 ? nlp : null
+    return nlp.intents.length > 0 ? nlp : null
+  }
+
+  _resetNlpTurnState () {
+    this.saAwaitingNlpResponse = false
+    this.saHandledWebhookIds = new Set()
+    this.saLastUserMessageText = null
+    this.saLastMessageId = null
+    this.saEmittedResponseCount = 0
+    this.saLastEmittedIntentName = null
+    this.saLastSeenFanCount = null
+    this.saLastSeenLatestMessageTime = null
+    this.saTurnBaselineFanCount = null
+    this.saTurnBaselineLatestMessageTime = null
+  }
+
+  _armNlpTurn (messageText, messageId) {
+    this.saAwaitingNlpResponse = true
+    this.saLastUserMessageText = messageText || ''
+    this.saLastMessageId = messageId || null
+    this.saTurnBaselineFanCount = this.saLastSeenFanCount
+    this.saTurnBaselineLatestMessageTime = this.saLastSeenLatestMessageTime
+  }
+
+  _isEligibleNlpTurnUpdate (payload, nlp) {
+    if (this.saEmittedResponseCount === 0) {
+      return true
+    }
+
+    const fanCount = payload.associatedFanMessageCount
+    const latestMessageTime = payload.latestMessageAssociatedTime
+    const intentName = nlp?.intent?.name || null
+
+    const fanIncreased = this.saTurnBaselineFanCount != null &&
+      fanCount != null &&
+      fanCount > this.saTurnBaselineFanCount
+    const timeAdvanced = this.saTurnBaselineLatestMessageTime != null &&
+      latestMessageTime != null &&
+      latestMessageTime > this.saTurnBaselineLatestMessageTime
+    const intentChanged = intentName &&
+      this.saLastEmittedIntentName &&
+      intentName !== this.saLastEmittedIntentName
+
+    return !!(fanIncreased || timeAdvanced || intentChanged)
   }
 
   _processInboundEvent (event) {
-    if (!this.processInbound) {
-      debug('_processInboundEvent: processInbound=false, skipping')
+    if (!this.processInbound || !this.saAwaitingNlpResponse) {
       return
     }
 
     const body = event.body
-    if (!body) {
-      debug('_processInboundEvent: no body in event')
+    if (!body || body.type !== 'case.update' || !body.payload) {
       return
     }
 
-    debug(`_processInboundEvent: received event type: ${body.type}`)
-
-    if (body.type !== 'case.update') {
-      debug(`_processInboundEvent: ignoring event type ${body.type}`)
-      return
+    if (body.id) {
+      if (this.saHandledWebhookIds.has(body.id)) {
+        return
+      }
+      this.saHandledWebhookIds.add(body.id)
     }
 
     const payload = body.payload
-    if (!payload) {
-      debug('_processInboundEvent: no payload in event body')
-      return
-    }
-
-    // PRIMARY MATCHING: Match by caseNumber
     const inboundCaseNumber = payload.caseNumber
-    if (!inboundCaseNumber) {
-      debug('_processInboundEvent: no caseNumber in webhook payload')
+    if (!inboundCaseNumber || inboundCaseNumber !== this.saCaseNumber) {
       return
     }
 
-    debug('🔍 Matching webhook response:')
-    debug(`   Inbound Case Number: ${inboundCaseNumber}`)
-    debug(`   Expected Case Number: ${this.saCaseNumber}`)
-
-    if (inboundCaseNumber !== this.saCaseNumber) {
-      debug('   ❌ Case number mismatch - ignoring this webhook')
+    const caseText = payload.description || payload.subject || ''
+    const messageText = this.saLastUserMessageText || caseText
+    const customProps = payload.workflow?.customProperties || {}
+    if (Object.keys(customProps).length === 0) {
       return
     }
 
-    debug('   ✅ Case number matched!')
-
-    // SECONDARY MATCHING: Verify conversationId for extra safety
-    const inboundConvId = payload.externalCase?.id || payload.conversationId
-    if (inboundConvId) {
-      debug(`   Conversation ID: ${inboundConvId}`)
-      if (this.saConversationId && inboundConvId !== this.saConversationId) {
-        debug(`   ⚠️  Conversation ID mismatch (expected: ${this.saConversationId}, got: ${inboundConvId})`)
-        debug('   ⚠️  But case number matches, so proceeding...')
-      } else {
-        debug('   ✅ Conversation ID also matched!')
-      }
+    const nlp = this._extractIntentFromWebhook(customProps)
+    if (!nlp || !this._isEligibleNlpTurnUpdate(payload, nlp)) {
+      return
     }
 
-    // Extract message from case description or subject
-    const messageText = payload.description || payload.subject || ''
-    debug(`   Message text: "${messageText}"`)
-
-    // Build bot message
     const botMsg = {
       sender: 'bot',
       messageText: messageText,
-      sourceData: body
+      sourceData: body,
+      nlp
     }
 
-    // Extract intent from custom properties
-    const customProps = payload.workflow?.customProperties || {}
-    if (Object.keys(customProps).length > 0) {
-      debug('   Custom properties found:', JSON.stringify(customProps, null, 2))
-      botMsg.nlp = this._extractIntentFromWebhook(customProps)
-      if (botMsg.nlp) {
-        debug(`   ✅ Intent extracted: ${botMsg.nlp.intent?.name} (confidence: ${botMsg.nlp.intent?.confidence})`)
-      } else {
-        debug('   ⚠️  No intent extracted from custom properties')
-      }
-    } else {
-      debug('   ⚠️  No custom properties found in webhook payload')
+    this.saAwaitingNlpResponse = false
+    this.saEmittedResponseCount += 1
+    this.saLastEmittedIntentName = nlp.intent?.name || null
+    if (payload.associatedFanMessageCount != null) {
+      this.saLastSeenFanCount = payload.associatedFanMessageCount
+    }
+    if (payload.latestMessageAssociatedTime != null) {
+      this.saLastSeenLatestMessageTime = payload.latestMessageAssociatedTime
     }
 
-    debug('✅ Inbound bot message ready:', JSON.stringify(botMsg, null, 2))
+    debug(`NLP response: intent=${nlp.intent?.name}, text="${messageText}"`)
     setTimeout(() => this.queueBotSays(botMsg), 0)
   }
 
-  // ============================================================================
   // BUILD - REDIS SETUP FOR NLP TESTING MODE
   // ============================================================================
 
   async Build () {
     debug('Build called')
     this.mode = this._getMode()
-    debug(`Connector mode: ${this.mode}`)
 
     if (this._isNlpTestingMode()) {
       // Validate Redis URL from Botium Box
@@ -405,7 +365,7 @@ class BotiumConnectorSprinkl {
       // Verify Redis is reachable during Build
       try {
         await this.redis.connect()
-        debug('Redis connection verified during Build')
+        debug('Redis connection verified')
       } catch (err) {
         throw new Error(`Failed to connect to Redis at ${redisUrl}: ${err.message}`)
       }
@@ -419,126 +379,67 @@ class BotiumConnectorSprinkl {
 
   async Validate () {
     debug('Validate called')
-
     if (this._isNlpTestingMode()) {
-      debug('='.repeat(70))
-      debug('🔍 VALIDATING NLP TESTING MODE CONFIGURATION')
-      debug('='.repeat(70))
-
-      // Track missing capabilities
       const missingCaps = []
       const providedCaps = []
 
-      // Validate NLP testing capabilities
-      debug('1️⃣  Checking Account ID...')
       if (!this.caps[Capabilities.SPRINKL_SA_ACCOUNT_ID]) {
         missingCaps.push('SPRINKL_SA_ACCOUNT_ID')
-        debug('   ❌ SPRINKL_SA_ACCOUNT_ID is missing')
         throw new Error('SPRINKL_SA_ACCOUNT_ID capability required for NLP_TESTING mode')
-      } else {
-        providedCaps.push('SPRINKL_SA_ACCOUNT_ID')
-        debug(`   ✅ Account ID: ${this.caps[Capabilities.SPRINKL_SA_ACCOUNT_ID]}`)
       }
+      providedCaps.push('SPRINKL_SA_ACCOUNT_ID')
 
-      // OAuth 2.0 Client Credentials validation
-      debug('2️⃣  Checking OAuth Credentials...')
       if (!this.caps[Capabilities.SPRINKL_SA_CLIENT_ID]) {
         missingCaps.push('SPRINKL_SA_CLIENT_ID')
-        debug('   ❌ SPRINKL_SA_CLIENT_ID is missing')
         throw new Error('SPRINKL_SA_CLIENT_ID capability required for NLP Testing mode (OAuth 2.0)')
-      } else {
-        providedCaps.push('SPRINKL_SA_CLIENT_ID')
-        const maskedClientId = this.caps[Capabilities.SPRINKL_SA_CLIENT_ID].substring(0, 8) + '...'
-        debug(`   ✅ Client ID: ${maskedClientId}`)
       }
+      providedCaps.push('SPRINKL_SA_CLIENT_ID')
 
       if (!this.caps[Capabilities.SPRINKL_SA_CLIENT_SECRET]) {
         missingCaps.push('SPRINKL_SA_CLIENT_SECRET')
-        debug('   ❌ SPRINKL_SA_CLIENT_SECRET is missing')
         throw new Error('SPRINKL_SA_CLIENT_SECRET capability required for NLP Testing mode (OAuth 2.0)')
-      } else {
-        providedCaps.push('SPRINKL_SA_CLIENT_SECRET')
-        debug('   ✅ Client Secret: ********')
       }
+      providedCaps.push('SPRINKL_SA_CLIENT_SECRET')
 
-      debug('3️⃣  Checking Environment...')
       if (!this.caps[Capabilities.SPRINKL_SA_ENVIRONMENT]) {
         missingCaps.push('SPRINKL_SA_ENVIRONMENT')
-        debug('   ❌ SPRINKL_SA_ENVIRONMENT is missing')
         throw new Error('SPRINKL_SA_ENVIRONMENT capability required for NLP Testing mode')
-      } else {
-        providedCaps.push('SPRINKL_SA_ENVIRONMENT')
-        debug(`   ✅ Environment: ${this.caps[Capabilities.SPRINKL_SA_ENVIRONMENT]}`)
       }
+      providedCaps.push('SPRINKL_SA_ENVIRONMENT')
 
-      // Validate sender and receiver profiles
-      debug('4️⃣  Checking Sender Profile...')
       if (!this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE]) {
         missingCaps.push('SPRINKL_SA_SENDER_PROFILE')
-        debug('   ❌ SPRINKL_SA_SENDER_PROFILE is missing')
         throw new Error('SPRINKL_SA_SENDER_PROFILE capability required for NLP Testing mode')
-      } else {
-        providedCaps.push('SPRINKL_SA_SENDER_PROFILE')
-        try {
-          // Parse and validate sender profile
-          const senderProfile = _.isString(this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE])
-            ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE])
-            : this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE]
-          if (!senderProfile || !senderProfile.id) {
-            debug('   ❌ Sender profile missing required "id" field')
-            throw new Error('SPRINKL_SA_SENDER_PROFILE must have an "id" field')
-          }
-          debug(`   ✅ Sender Profile ID: ${senderProfile.id}`)
-        } catch (err) {
-          debug(`   ❌ Sender profile validation failed: ${err.message}`)
-          throw err
-        }
+      }
+      providedCaps.push('SPRINKL_SA_SENDER_PROFILE')
+      const senderProfile = _.isString(this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE])
+        ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE])
+        : this.caps[Capabilities.SPRINKL_SA_SENDER_PROFILE]
+      if (!senderProfile || !senderProfile.id) {
+        throw new Error('SPRINKL_SA_SENDER_PROFILE must have an "id" field')
       }
 
-      debug('5️⃣  Checking Receiver Profile...')
       if (!this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE]) {
         missingCaps.push('SPRINKL_SA_RECEIVER_PROFILE')
-        debug('   ❌ SPRINKL_SA_RECEIVER_PROFILE is missing')
         throw new Error('SPRINKL_SA_RECEIVER_PROFILE capability required for NLP Testing mode')
-      } else {
-        providedCaps.push('SPRINKL_SA_RECEIVER_PROFILE')
-        try {
-          // Parse and validate receiver profile
-          const receiverProfile = _.isString(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
-            ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
-            : this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE]
-          if (!receiverProfile || !receiverProfile.id) {
-            debug('   ❌ Receiver profile missing required "id" field')
-            throw new Error('SPRINKL_SA_RECEIVER_PROFILE must have an "id" field')
-          }
-          debug(`   ✅ Receiver Profile ID: ${receiverProfile.id}`)
-        } catch (err) {
-          debug(`   ❌ Receiver profile validation failed: ${err.message}`)
-          throw err
-        }
+      }
+      providedCaps.push('SPRINKL_SA_RECEIVER_PROFILE')
+      const receiverProfile = _.isString(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
+        ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
+        : this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE]
+      if (!receiverProfile || !receiverProfile.id) {
+        throw new Error('SPRINKL_SA_RECEIVER_PROFILE must have an "id" field')
       }
 
-      // Validate OAuth credentials by fetching a token
-      debug('6️⃣  Testing OAuth Authentication...')
-      debug(`   🔐 Token URL: https://api3.sprinklr.com/${this.caps[Capabilities.SPRINKL_SA_ENVIRONMENT] || 'prod3'}/oauth/token`)
-      debug('   🔐 Grant Type: client_credentials')
       try {
         await this._fetchSAToken()
-        debug('   ✅ OAuth token acquired successfully!')
-        debug(`   ✅ Token expires in: ${this.saTokenExpiresAt ? Math.floor((this.saTokenExpiresAt - Date.now()) / 1000) + ' seconds' : 'unknown'}`)
       } catch (err) {
-        debug(`   ❌ OAuth authentication FAILED: ${err.message}`)
         throw new Error(`SA OAuth credential validation failed: ${err.message}`)
       }
 
-      debug('='.repeat(70))
-      debug('✅ ALL VALIDATIONS PASSED - NLP Testing Mode Ready')
-      debug(`   Provided capabilities: ${providedCaps.length}/6`)
-      debug(`   Missing capabilities: ${missingCaps.length}`)
-      debug('='.repeat(70))
+      debug(`NLP Testing validation passed (${providedCaps.length}/6 capabilities)`)
     } else {
       // Live Chat mode validation (ORIGINAL API)
-      debug('🔍 VALIDATING LIVE CHAT MODE CONFIGURATION')
 
       if (!this.caps[Capabilities.SPRINKL_ENVIRONMENT]) {
         throw new Error('SPRINKL_ENVIRONMENT capability required for LIVE_CHAT mode')
@@ -552,8 +453,6 @@ class BotiumConnectorSprinkl {
       if (this.caps[Capabilities.SPRINKL_CHAT_USER] && !this.caps[Capabilities.SPRINKL_API_KEY]) {
         throw new Error('SPRINKL_API_KEY capability required when SPRINKL_CHAT_USER is provided')
       }
-
-      debug('✅ LIVE_CHAT mode validation successful')
     }
   }
 
@@ -571,23 +470,21 @@ class BotiumConnectorSprinkl {
 
       // Fetch OAuth token automatically
       await this._ensureSAToken()
-      debug(`OAuth token acquired for NLP Testing (environment: ${this.saEnvironment})`)
 
-      // Auto-generate conversation ID
+      // Auto-generate conversation ID (reused across turns in this session)
       this.saConversationId = `case_${crypto.randomBytes(16).toString('hex')}`
       this.saCaseNumber = null // Will be set after first message
       this.saPendingMessages.clear()
+      this._resetNlpTurnState()
 
-      debug(`NLP Testing mode initialized: accountId=${this.saAccountId}, conversationId=${this.saConversationId}, environment=${this.saEnvironment}`)
-
-      // Enable inbound processing
       if (this.redis) {
         await this.redis.subscribe(this.redisTopic)
         this.processInbound = true
-        debug(`Redis subscribed to ${this.redisTopic}, conversation: ${this.saConversationId}`)
       } else {
         debug('Warning: Redis not initialized in NLP_TESTING mode')
       }
+
+      debug(`NLP Testing started: accountId=${this.saAccountId}, conversationId=${this.saConversationId}, environment=${this.saEnvironment}`)
 
       return
     }
@@ -775,7 +672,6 @@ class BotiumConnectorSprinkl {
     debug(`UserSays called ${util.inspect(msg)}`)
 
     if (this._isNlpTestingMode()) {
-      // NLP Testing mode - Source-Agnostic API
       await this._ensureSAToken()
 
       const url = `https://api2.sprinklr.com/${this.saEnvironment}/api/v2/source-agnostic/${this.saAccountId}/send`
@@ -788,7 +684,9 @@ class BotiumConnectorSprinkl {
         ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
         : this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE]
 
+      // New messageId per turn, same conversationId for the session
       const messageId = `msg_${crypto.randomBytes(16).toString('hex')}`
+      this._armNlpTurn(msg.messageText, messageId)
 
       const body = {
         messageId: messageId,
@@ -800,16 +698,7 @@ class BotiumConnectorSprinkl {
         }
       }
 
-      debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-      debug('📤 SENDING MESSAGE TO SPRINKLR (Source-Agnostic API)')
-      debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-      debug(`   URL: ${url}`)
-      debug(`   Message ID: ${messageId}`)
-      debug(`   Conversation ID: ${this.saConversationId}`)
-      debug(`   Sender: ${senderProfile.id}`)
-      debug(`   Receiver: ${receiverProfile.id}`)
-      debug(`   Text: "${msg.messageText}"`)
-      debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+      debug(`Sending SA message: conversationId=${this.saConversationId}, messageId=${messageId}, text="${msg.messageText}"`)
 
       try {
         const response = await fetch(url, {
@@ -823,31 +712,22 @@ class BotiumConnectorSprinkl {
 
         if (!response.ok) {
           const errorText = await response.text()
-          debug(`❌ Failed to send message: ${response.status}/${response.statusText} - ${errorText}`)
           throw new Error(`Failed to send message: ${response.status}/${response.statusText} - ${errorText}`)
         }
 
         const responseData = await response.json()
-        debug('✅ Message sent successfully!')
-        debug('   Response:', JSON.stringify(responseData, null, 2))
-
         if (responseData.data) {
           this.saCaseNumber = parseInt(responseData.data, 10)
-          debug(`   📋 Case Number received: ${this.saCaseNumber}`)
-          debug(`   ⏳ Waiting for webhook response with case number: ${this.saCaseNumber}`)
+          debug(`SA message sent, caseNumber=${this.saCaseNumber}`)
         } else {
-          debug('   ⚠️  No case number in response')
+          debug('SA message sent, but no case number in response')
         }
 
         if (responseData.errors && responseData.errors.length > 0) {
-          debug('   ⚠️  Errors in response:', responseData.errors)
+          debug(`SA send response errors: ${JSON.stringify(responseData.errors)}`)
         }
-
-        debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-        debug('✅ UserSays NLP_TESTING: Message sent, awaiting webhook')
-        debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
       } catch (err) {
-        debug(`❌ Error sending message: ${err.message}`)
+        debug(`SA send error: ${err.message}`)
         throw new Error(`Failed to send message in NLP_TESTING mode: ${err.message}`)
       }
 
@@ -925,6 +805,7 @@ class BotiumConnectorSprinkl {
       this.saAuthToken = null
       this.saTokenExpiresAt = null
       this.saRefreshToken = null
+      this._resetNlpTurnState()
       if (this.saPendingMessages) {
         this.saPendingMessages.clear()
       }
