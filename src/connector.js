@@ -229,12 +229,40 @@ class BotiumConnectorSprinkl {
     this.saTurnBaselineLatestMessageTime = null
   }
 
+  _newSaConversationId () {
+    return `case_${crypto.randomBytes(16).toString('hex')}`
+  }
+
+  // Sprinklr case.update is case-scoped: the first message owns the case.
+  // Each UserSays therefore starts a new conversation/case so NLP is isolated.
+  _beginNlpUtterance (messageText, messageId) {
+    this.saConversationId = this._newSaConversationId()
+    this.saCaseNumber = null
+    this._resetNlpTurnState()
+    this._armNlpTurn(messageText, messageId)
+  }
+
   _armNlpTurn (messageText, messageId) {
     this.saAwaitingNlpResponse = true
     this.saLastUserMessageText = messageText || ''
     this.saLastMessageId = messageId || null
     this.saTurnBaselineFanCount = this.saLastSeenFanCount
     this.saTurnBaselineLatestMessageTime = this.saLastSeenLatestMessageTime
+  }
+
+  _getInboundConversationId (payload) {
+    return payload?.externalCase?.id || payload?.conversationId || null
+  }
+
+  _matchesCurrentNlpCase (payload) {
+    const inboundConvId = this._getInboundConversationId(payload)
+    if (this.saConversationId && inboundConvId) {
+      return inboundConvId === this.saConversationId
+    }
+    if (this.saCaseNumber != null && payload.caseNumber != null) {
+      return Number(payload.caseNumber) === Number(this.saCaseNumber)
+    }
+    return false
   }
 
   _isEligibleNlpTurnUpdate (payload, nlp) {
@@ -277,9 +305,12 @@ class BotiumConnectorSprinkl {
     }
 
     const payload = body.payload
-    const inboundCaseNumber = payload.caseNumber
-    if (!inboundCaseNumber || inboundCaseNumber !== this.saCaseNumber) {
+    if (!this._matchesCurrentNlpCase(payload)) {
       return
+    }
+
+    if (this.saCaseNumber == null && payload.caseNumber != null) {
+      this.saCaseNumber = Number(payload.caseNumber)
     }
 
     const caseText = payload.description || payload.subject || ''
@@ -471,9 +502,9 @@ class BotiumConnectorSprinkl {
       // Fetch OAuth token automatically
       await this._ensureSAToken()
 
-      // Auto-generate conversation ID (reused across turns in this session)
-      this.saConversationId = `case_${crypto.randomBytes(16).toString('hex')}`
-      this.saCaseNumber = null // Will be set after first message
+      // Conversation/case is created per UserSays so each utterance has its own NLP result
+      this.saConversationId = null
+      this.saCaseNumber = null
       this.saPendingMessages.clear()
       this._resetNlpTurnState()
 
@@ -484,7 +515,7 @@ class BotiumConnectorSprinkl {
         debug('Warning: Redis not initialized in NLP_TESTING mode')
       }
 
-      debug(`NLP Testing started: accountId=${this.saAccountId}, conversationId=${this.saConversationId}, environment=${this.saEnvironment}`)
+      debug(`NLP Testing started: accountId=${this.saAccountId}, environment=${this.saEnvironment}`)
 
       return
     }
@@ -684,9 +715,9 @@ class BotiumConnectorSprinkl {
         ? JSON.parse(this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE])
         : this.caps[Capabilities.SPRINKL_SA_RECEIVER_PROFILE]
 
-      // New messageId per turn, same conversationId for the session
+      // New conversation/case per message — Sprinklr case.update is case-scoped
       const messageId = `msg_${crypto.randomBytes(16).toString('hex')}`
-      this._armNlpTurn(msg.messageText, messageId)
+      this._beginNlpUtterance(msg.messageText, messageId)
 
       const body = {
         messageId: messageId,
