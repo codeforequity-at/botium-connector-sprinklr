@@ -239,11 +239,16 @@ describe('NLP Testing Mode', function () {
       }, 50)
     })
 
-    it('should ignore webhook with non-matching case number', function (done) {
+    it('should ignore webhook with non-matching conversation id', function (done) {
       let queuedMessage = null
       const connector = createConnector((msg) => { queuedMessage = msg })
 
-      const event = caseUpdate({ id: 'evt_mismatch', intent: 'Greetings', fanCount: 1 })
+      const event = caseUpdate({
+        id: 'evt_mismatch',
+        intent: 'Greetings',
+        fanCount: 1,
+        convId: 'case_other'
+      })
       event.body.payload.caseNumber = 999999
       connector._processInboundEvent(event)
 
@@ -379,68 +384,119 @@ describe('NLP Testing Mode', function () {
       }, 50)
     })
 
-    it('should support multiple turns in one conversation with one response each', function (done) {
+    it('should ignore previous-case webhooks after a new utterance starts', function (done) {
       const queued = []
       const connector = createConnector((msg) => { queued.push(msg) })
 
-      // Turn 1: hi -> Greetings
       connector.saLastUserMessageText = 'hi'
       connector._processInboundEvent(caseUpdate({
-        id: 'evt_t1_a', version: 2, description: 'hi', intent: 'Greetings',
-        fanCount: 1, latestMessageTime: 1000
-      }))
-      connector._processInboundEvent(caseUpdate({
-        id: 'evt_t1_b', version: 3, description: 'hi', intent: 'Greetings',
-        fanCount: 1, latestMessageTime: 1000
+        id: 'evt_t1', version: 2, description: 'hi', intent: 'Greetings',
+        fanCount: 1, latestMessageTime: 1000, convId: 'case_test'
       }))
 
-      // Turn 2: how are you -> Help (same conversation / case)
-      connector._armNlpTurn('how are you', 'msg_turn2')
+      connector._beginNlpUtterance('hello charlie', 'msg_turn2')
+      const newConvId = connector.saConversationId
+
       connector._processInboundEvent(caseUpdate({
-        id: 'evt_t2_stale', version: 4, description: 'hi', intent: 'Greetings',
-        fanCount: 1, latestMessageTime: 1000
+        id: 'evt_old_case', version: 10, description: 'hi', intent: 'Greetings',
+        fanCount: 3, latestMessageTime: 2000, convId: 'case_test'
       }))
       connector._processInboundEvent(caseUpdate({
-        id: 'evt_t2_ok', version: 5, description: 'hi', intent: 'Help',
-        fanCount: 2, latestMessageTime: 2000
-      }))
-      connector._processInboundEvent(caseUpdate({
-        id: 'evt_t2_extra', version: 6, description: 'hi', intent: 'Help',
-        fanCount: 2, latestMessageTime: 2000
+        id: 'evt_new_case', version: 1, description: 'hello charlie', intent: 'Help',
+        fanCount: 1, latestMessageTime: 3000, convId: newConvId
       }))
 
       setTimeout(() => {
         assert.equal(queued.length, 2)
         assert.equal(queued[0].messageText, 'hi')
         assert.equal(queued[0].nlp.intent.name, 'Greetings')
-        assert.equal(queued[1].messageText, 'how are you')
+        assert.equal(queued[1].messageText, 'hello charlie')
         assert.equal(queued[1].nlp.intent.name, 'Help')
-        assert.equal(connector.saEmittedResponseCount, 2)
+        assert.notEqual(newConvId, 'case_test')
         assert.equal(connector.saAwaitingNlpResponse, false)
         done()
       }, 50)
     })
 
-    it('should accept later turn when fan count advances even if intent is unchanged', function (done) {
-      const queued = []
-      const connector = createConnector((msg) => { queued.push(msg) })
+    it('should match webhook by conversation id before case number is known', function (done) {
+      let queuedMessage = null
+      const connector = createConnector((msg) => { queuedMessage = msg })
+      connector.saConversationId = 'case_pending'
+      connector.saCaseNumber = null
+      connector.saLastUserMessageText = 'hello charlie'
 
-      connector.saLastUserMessageText = 'hi'
-      connector._processInboundEvent(caseUpdate({
-        id: 'evt_u1', intent: 'Greetings', fanCount: 1, latestMessageTime: 1000
-      }))
+      const event = caseUpdate({
+        id: 'evt_pending',
+        description: 'hello charlie',
+        intent: 'Help',
+        fanCount: 1,
+        convId: 'case_pending'
+      })
+      event.body.payload.caseNumber = 204209
 
-      connector._armNlpTurn('where are you', 'msg_turn2')
-      connector._processInboundEvent(caseUpdate({
-        id: 'evt_u2', intent: 'Greetings', fanCount: 2, latestMessageTime: 2000
-      }))
+      connector._processInboundEvent(event)
 
       setTimeout(() => {
-        assert.equal(queued.length, 2)
-        assert.equal(queued[1].messageText, 'where are you')
-        assert.equal(queued[1].nlp.intent.name, 'Greetings')
+        assert.isNotNull(queuedMessage)
+        assert.equal(queuedMessage.nlp.intent.name, 'Help')
+        assert.equal(connector.saCaseNumber, 204209)
         done()
       }, 50)
+    })
+  })
+
+  describe('UserSays conversation isolation', function () {
+    const nlpCaps = {
+      [Capabilities.SPRINKL_MODE]: 'NLP_TESTING',
+      [Capabilities.SPRINKL_SA_ACCOUNT_ID]: '300289798',
+      [Capabilities.SPRINKL_SA_CLIENT_ID]: 'client-id',
+      [Capabilities.SPRINKL_SA_CLIENT_SECRET]: 'client-secret',
+      [Capabilities.SPRINKL_SA_ENVIRONMENT]: 'prod3',
+      [Capabilities.SPRINKL_SA_SENDER_PROFILE]: { id: 'sender-1' },
+      [Capabilities.SPRINKL_SA_RECEIVER_PROFILE]: { id: 'receiver-1' }
+    }
+
+    it('should start a new conversation for each user message', async function () {
+      const connector = new BotiumConnectorSprinkl({
+        queueBotSays: () => {},
+        caps: nlpCaps
+      })
+      connector.saAuthToken = 'token'
+      connector.saTokenExpiresAt = Date.now() + 60000
+      connector.saAccountId = '300289798'
+      connector.saEnvironment = 'prod3'
+
+      const sentConversationIds = []
+      const originalFetch = global.fetch
+      global.fetch = async (url, options) => {
+        const body = JSON.parse(options.body)
+        sentConversationIds.push(body.conversationId)
+        return {
+          ok: true,
+          json: async () => ({ data: String(200000 + sentConversationIds.length), errors: [] })
+        }
+      }
+
+      try {
+        await connector.UserSays({ messageText: 'have a nice day' })
+        const firstConversationId = sentConversationIds[0]
+        const firstCaseNumber = connector.saCaseNumber
+
+        await connector.UserSays({ messageText: 'hello charlie' })
+        const secondConversationId = sentConversationIds[1]
+
+        assert.equal(sentConversationIds.length, 2)
+        assert.match(firstConversationId, /^case_[a-f0-9]{32}$/)
+        assert.match(secondConversationId, /^case_[a-f0-9]{32}$/)
+        assert.notEqual(firstConversationId, secondConversationId)
+        assert.equal(connector.saConversationId, secondConversationId)
+        assert.equal(firstCaseNumber, 200001)
+        assert.equal(connector.saCaseNumber, 200002)
+        assert.equal(connector.saLastUserMessageText, 'hello charlie')
+        assert.equal(connector.saAwaitingNlpResponse, true)
+      } finally {
+        global.fetch = originalFetch
+      }
     })
   })
 
